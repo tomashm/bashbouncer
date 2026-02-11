@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/tomashm/projects/personal/bashbouncer/bashbouncer.py --hook",
+            "command": "python3 bashbouncer.py --hook",
             "timeout": 15
           }
         ]
