@@ -85,7 +85,7 @@ This file is passed as additional context to the LLM classifier. Write project-s
 
 ## Installation
 
-BashBouncer uses [Cerebras](https://cloud.cerebras.ai/) for LLM classification (free API keys, generous limits):
+BashBouncer uses [Cerebras](https://cloud.cerebras.ai/) for LLM classification (lightning fast, free API keys, generous limits):
 
 ```bash
 # Add to your shell profile (~/.zshrc, ~/.bashrc, etc.)
