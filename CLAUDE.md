@@ -72,7 +72,7 @@ never allow cat for files outside the project root.
 ```
 BashBouncer writes all user overrides here. The LLM reads these rules and applies them with nuance.
 
-**Native permissions** (read-only): `.claude/settings.local.json` — BashBouncer reads `permissions.allow` and `permissions.deny` entries matching `Bash(prefix:*)` and uses them as a fast-path before classification. BashBouncer never writes to this file.
+**Native permissions** (read-only): BashBouncer reads `permissions.allow` and `permissions.deny` entries matching `Bash(prefix:*)` from all four Claude Code settings locations (`<project>/.claude/settings.local.json`, `<project>/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.claude/settings.json`) and uses them as a fast-path before classification. BashBouncer never writes to these files.
 
 ## Key design decisions
 

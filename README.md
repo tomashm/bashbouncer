@@ -65,6 +65,19 @@ Rails console is a normal part of our workflow.
 
 Blocklist wins over allowlist. Neither overrides built-in blocks (`sudo`, `rm -rf`, etc. are always blocked).
 
+## Native permissions integration
+
+BashBouncer reads `Bash(prefix:*)` entries from Claude Code's own settings files (read-only — it never writes to them):
+
+| File | Scope |
+|------|-------|
+| `<project>/.claude/settings.local.json` | User-local, per-project |
+| `<project>/.claude/settings.json` | Team-shared, per-project |
+| `~/.claude/settings.local.json` | User-local, global |
+| `~/.claude/settings.json` | Global defaults |
+
+All four files are checked. Entries from `permissions.allow` and `permissions.deny` are extracted and used as a fast-path before the static/LLM classification pipeline. Deny wins over allow.
+
 ## Installation
 
 BashBouncer uses [Cerebras](https://cloud.cerebras.ai/) for LLM classification (free API keys, generous limits):

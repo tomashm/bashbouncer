@@ -94,7 +94,13 @@ def load_user_config(root: str) -> tuple[list[str], list[str], str]:
 
 
 def load_user_permissions(cwd: str) -> tuple[list[str], list[str]]:
-    """Load Bash allow/deny prefixes from .claude/settings.local.json.
+    """Load Bash allow/deny prefixes from Claude Code settings files.
+
+    Reads all four settings locations (most specific first):
+      1. <project>/.claude/settings.local.json  (user-local, per-project)
+      2. <project>/.claude/settings.json         (team-shared, per-project)
+      3. ~/.claude/settings.local.json           (user-local, global)
+      4. ~/.claude/settings.json                 (global defaults)
 
     Parses entries like "Bash(aws:*)" → prefix "aws".
     Returns (allow_prefixes, deny_prefixes).
@@ -105,7 +111,9 @@ def load_user_permissions(cwd: str) -> tuple[list[str], list[str]]:
 
     for path in [
         os.path.join(cwd, ".claude", "settings.local.json") if cwd else None,
+        os.path.join(cwd, ".claude", "settings.json") if cwd else None,
         os.path.expanduser("~/.claude/settings.local.json"),
+        os.path.expanduser("~/.claude/settings.json"),
     ]:
         if not path or not os.path.exists(path):
             continue
