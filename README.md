@@ -7,27 +7,24 @@ For those who run `claude --dangerously-skip-permissions` but still want a safet
 ## How it works
 
 ```
-command ──► settings.json ──► LLM ──► ask you
-                 │              │          │
-             allow/deny    allow/block  allow/block
+command ──► prefix rules ──► LLM ──► ask you
+                 │             │          │
+            allow/deny     allow/deny  allow/deny
 ```
 
-**Settings.json permissions** are checked first. BashBouncer reads `Bash(prefix:*)` entries from Claude Code's own settings files (read-only — it never writes to them) and uses them as a fast-path. All four locations are checked: `<project>/.claude/settings.local.json`, `<project>/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.claude/settings.json`.
+**Prefix rules** are checked first — zero latency. Sources:
+- `Bash(prefix:*)` entries from Claude Code's settings files (all four: `<project>/.claude/settings.local.json`, `<project>/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.claude/settings.json`)
+- Allowlist/blocklist in `.claude/bashbouncer.local.md` frontmatter
+
+Prefix matches are hard allow/deny — no LLM call, no user prompt.
 
 **LLM classification** handles everything else — destructive git flags, secret variable references, file ops outside project root, cloud CLI mutations, system-wide installs. Uses Cerebras for fast, cheap inference.
 
-**Ask you** is the fallback. If the LLM isn't confident or flags a command as unsafe, you decide. All denies are soft — you can always override.
-
-## What gets blocked
-
-| Category | Examples |
-|----------|----------|
-| **Blocked by LLM** | `sudo`, `rm -rf`, `echo $API_KEY`, `git push --force`, `docker --privileged`, `aws s3 rm`, `terraform destroy`, `env`/`printenv`, file ops outside project root |
-| **Always allowed** | `ls`, `cat`, `grep`, `find`, `echo`, `date`, `wc`, `file`, `stat` (when matched by settings.json prefix) |
+**Ask you** is the fallback. If the LLM flags a command as unsafe or can't decide, you get four options: allow once, allow (teaches BashBouncer), block, or block always.
 
 ## What you'll see
 
-**Nothing, most of the time.** Commands matched by settings.json run silently. LLM-approved commands run with a subtle timing annotation.
+**Nothing, most of the time.** Prefix-matched commands run silently. LLM-approved commands run with a subtle timing annotation.
 
 When BashBouncer isn't sure, Claude asks you to allow or deny. If you allow, it offers to remember your choice so you're not asked again.
 
