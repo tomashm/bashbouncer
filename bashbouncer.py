@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import hashlib
 import json
 import os
 import re
@@ -47,48 +48,58 @@ PROC_ENVIRON_RE = re.compile(r"/proc/(\d+|self)/environ")
 
 # --- User config ---
 
-CONFIG_PATH = os.path.expanduser("~/.claude/bashbouncer.local.md")
+CONFIG_FILENAME = ".claude/bashbouncer.local.md"
 
 
-def load_config() -> tuple[list[str], list[str], str]:
-    """Load user config from ~/.claude/bashbouncer.local.md.
+def load_prompt_context(root: str) -> str:
+    """Load LLM classification context from {root}/.claude/bashbouncer.local.md."""
+    path = os.path.join(root, CONFIG_FILENAME) if root else ""
+    if not path or not os.path.exists(path):
+        return ""
 
-    Returns (allowlist, blocklist, prompt_context).
-    """
-    if not os.path.exists(CONFIG_PATH):
-        return [], [], ""
-
-    with open(CONFIG_PATH) as f:
+    with open(path) as f:
         text = f.read()
 
-    if not text.startswith("---"):
-        return [], [], text.strip()
+    # Skip YAML frontmatter if present, return markdown body only
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        return parts[2].strip() if len(parts) > 2 else ""
 
-    parts = text.split("---", 2)
-    yaml_text = parts[1] if len(parts) > 1 else ""
-    body = parts[2].strip() if len(parts) > 2 else ""
+    return text.strip()
 
-    allowlist: list[str] = []
-    blocklist: list[str] = []
-    current_key: str | None = None
 
-    for line in yaml_text.split("\n"):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
+def load_user_permissions(cwd: str) -> tuple[list[str], list[str]]:
+    """Load Bash allow/deny prefixes from .claude/settings.local.json.
+
+    Parses entries like "Bash(aws:*)" → prefix "aws".
+    Returns (allow_prefixes, deny_prefixes).
+    """
+    allow: list[str] = []
+    deny: list[str] = []
+    bash_re = re.compile(r'^Bash\((.+?)(?::\*?)?\)$')
+
+    for path in [
+        os.path.join(cwd, ".claude", "settings.local.json") if cwd else None,
+        os.path.expanduser("~/.claude/settings.local.json"),
+    ]:
+        if not path or not os.path.exists(path):
             continue
-        if stripped.endswith(":") and not stripped.startswith("-"):
-            current_key = stripped[:-1].strip()
-        elif stripped.startswith("- "):
-            value = stripped[2:].strip()
-            if current_key == "allowlist":
-                allowlist.append(value)
-            elif current_key == "blocklist":
-                blocklist.append(value)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            perms = data.get("permissions", {})
+            for entry in perms.get("allow", []):
+                m = bash_re.match(entry)
+                if m:
+                    allow.append(m.group(1))
+            for entry in perms.get("deny", []):
+                m = bash_re.match(entry)
+                if m:
+                    deny.append(m.group(1))
+        except (json.JSONDecodeError, OSError):
+            continue
 
-    return allowlist, blocklist, body
-
-
-USER_ALLOWLIST, USER_BLOCKLIST, USER_PROMPT_CONTEXT = load_config()
+    return allow, deny
 
 
 # --- Helpers ---
@@ -96,6 +107,7 @@ USER_ALLOWLIST, USER_BLOCKLIST, USER_PROMPT_CONTEXT = load_config()
 
 def is_within_root(path: str, root: str) -> bool:
     root = os.path.normpath(root)
+    path = os.path.expanduser(path)
     if not os.path.isabs(path):
         path = os.path.join(root, path)
     path = os.path.normpath(path)
@@ -156,15 +168,6 @@ def check_reads_outside_root(segment: str, root: str) -> str | None:
     return None
 
 
-def matches_prefix_list(segment: str, prefix_list: list[str]) -> str | None:
-    """Check if segment starts with any entry in prefix_list."""
-    seg = segment.strip()
-    for entry in prefix_list:
-        if seg == entry or seg.startswith(entry + " "):
-            return entry
-    return None
-
-
 def has_non_flag_args(segment: str) -> bool:
     """Check if segment has non-flag arguments after the command."""
     try:
@@ -191,11 +194,13 @@ def prefilter(cmd: str, root: str) -> tuple[str, str]:
         return "UNKNOWN", "contains subshell or command substitution"
 
     # Redirects: check target against root
-    redir = re.search(r">>?\s*(\S+)", cmd)
-    if redir:
-        target = redir.group(1)
+    # Match >, >>, 2>, 2>> etc. Exclude trailing ; & | from target.
+    for redir in re.finditer(r"\d?>>?\s*([^\s;&|]+)", cmd):
+        target = os.path.expanduser(redir.group(1))
+        if target == "/dev/null":
+            continue
         if root and is_within_root(target, root):
-            return "SAFE", "redirect target within project root"
+            continue
         return "UNSAFE", f"redirect target '{target}' outside project root"
 
     # Split on pipes / chains
@@ -206,11 +211,6 @@ def prefilter(cmd: str, root: str) -> tuple[str, str]:
         if not seg:
             continue
         base = get_base_cmd(seg)
-
-        # User blocklist (prefix match) — checked first
-        blocked = matches_prefix_list(seg, USER_BLOCKLIST)
-        if blocked:
-            return "UNSAFE", f"'{blocked}' is on your block list"
 
         if base in UNSAFE_ALWAYS:
             return "UNSAFE", f"'{base}' is on the block list"
@@ -226,13 +226,13 @@ def prefilter(cmd: str, root: str) -> tuple[str, str]:
                 return "UNSAFE", f"'{base}' dumps environment variables including secrets"
             return "UNKNOWN", f"'{base}' may dump environment variables"
 
+        # SSH/SCP/rsync: always route through LLM for context-aware classification
+        if base in ("ssh", "scp", "rsync"):
+            return "UNKNOWN", f"'{base}' runs commands on remote hosts"
+
         if base in FILE_OPS:
             if not root or not check_paths_in_root(seg, root):
                 return "UNSAFE", f"'{base}' writes outside project root"
-            continue
-
-        # User allowlist (prefix match) — skip further checks for this segment
-        if matches_prefix_list(seg, USER_ALLOWLIST):
             continue
 
         if base not in SAFE_CMDS:
@@ -250,7 +250,7 @@ def prefilter(cmd: str, root: str) -> tuple[str, str]:
     return "SAFE", "all commands on the allow list"
 
 
-def classify_llm(cmd: str, root: str) -> tuple[str, str]:
+def classify_llm(cmd: str, root: str, prompt_context: str = "") -> tuple[str, str]:
     if not API_KEY:
         return "UNKNOWN", "no CEREBRAS_API_KEY set"
     try:
@@ -259,8 +259,9 @@ def classify_llm(cmd: str, root: str) -> tuple[str, str]:
             "SAFE: normal dev workflow — git (status/diff/log/add/commit/push/pull/checkout/branch), "
             "docker/compose (ps/up/build/run/logs), package managers (npm/yarn/pnpm/pip/cargo/bun install/run/test), "
             "build tools (make/gcc/cmake), cloud CLIs reading data (gcloud/aws/az logs/describe/list), "
-            "curl/wget for APIs, ssh to known hosts, test runners, linters, formatters.\n"
+            "curl/wget for APIs, ssh/scp to dev/staging/test hosts, test runners, linters, formatters.\n"
             "UNSAFE: destructive git (push --force, reset --hard, clean -f); "
+            "ssh/scp with destructive commands on production hosts; "
             "reads sensitive files outside root (cat ~/.ssh/id_rsa, cat /etc/shadow); "
             "commands that dump or exfiltrate environment variables (env, printenv, echo $SECRET_KEY); "
             "docker --privileged or mounting host root; "
@@ -269,8 +270,8 @@ def classify_llm(cmd: str, root: str) -> tuple[str, str]:
             "UNKNOWN: only if genuinely ambiguous.\n"
             "Reply with exactly one word."
         )
-        if USER_PROMPT_CONTEXT:
-            system_prompt += f"\n\nAdditional context from the user:\n{USER_PROMPT_CONTEXT}"
+        if prompt_context:
+            system_prompt += f"\n\nAdditional context from the user:\n{prompt_context}"
 
         body = json.dumps({
             "model": "llama-3.3-70b",
@@ -307,15 +308,29 @@ def classify_llm(cmd: str, root: str) -> tuple[str, str]:
         return "UNKNOWN", f"LLM error: {e}"
 
 
-def classify(cmd: str, root: str) -> tuple[str, str, str]:
+def classify(cmd: str, root: str, prompt_context: str = "") -> tuple[str, str, str]:
     verdict, reason = prefilter(cmd, root)
     if verdict == "UNKNOWN":
-        verdict, reason = classify_llm(cmd, root)
+        verdict, reason = classify_llm(cmd, root, prompt_context)
         return verdict, "llm", reason
     return verdict, "static", reason
 
 
 # --- Entry points ---
+
+
+def _allow_once_path(cmd: str) -> str:
+    h = hashlib.sha256(cmd.encode()).hexdigest()[:16]
+    return f"/tmp/bashbouncer-allow-{h}"
+
+
+def consume_allow_once(cmd: str) -> bool:
+    """Check for and consume a one-shot allow file. Returns True if found."""
+    path = _allow_once_path(cmd)
+    if os.path.exists(path):
+        os.unlink(path)
+        return True
+    return False
 
 
 def run_hook() -> None:
@@ -336,26 +351,96 @@ def run_hook() -> None:
         sys.exit(1)
     root = hook_input.get("cwd", "")
 
-    verdict, source, reason = classify(cmd, root)
+    # Check one-shot allow before classification
+    if consume_allow_once(cmd):
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+        }}))
+        return
 
-    decision = {"SAFE": "allow", "UNSAFE": "deny"}.get(verdict, "ask")
-    output: dict = {"hookSpecificOutput": {"permissionDecision": decision}}
-
+    # Check user permissions from settings.local.json
     base = get_base_cmd(cmd)
+    user_allow, user_deny = load_user_permissions(root)
+    # Deny wins over allow
+    for prefix in user_deny:
+        if cmd.strip() == prefix or cmd.strip().startswith(prefix + " "):
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": f"BashBouncer: '{prefix}' is on your deny list",
+            }}))
+            return
+    for prefix in user_allow:
+        if cmd.strip() == prefix or cmd.strip().startswith(prefix + " "):
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+            }}))
+            return
 
-    if decision == "deny":
-        output["systemMessage"] = f"BashBouncer [{source}] blocked: {cmd} -- {reason}"
-    elif decision == "ask":
-        msg = f"BashBouncer [{source}] unsure: {cmd} -- {reason}"
-        if not API_KEY:
-            msg += ". Tip: export CEREBRAS_API_KEY in your shell profile for auto-classification"
-        msg += (
-            f". If the user approves this command, offer to add '{base}' to their "
-            f"BashBouncer allowlist at ~/.claude/bashbouncer.local.md so they won't be asked again."
-        )
-        output["systemMessage"] = msg
+    prompt_context = load_prompt_context(root)
+    verdict, source, reason = classify(cmd, root, prompt_context)
+    allow_once_path = _allow_once_path(cmd)
 
-    print(json.dumps(output))
+    if verdict == "SAFE":
+        output: dict = {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+        }}
+        if source == "llm":
+            output["hookSpecificOutput"]["permissionDecisionReason"] = (
+                f"[allowed by {source}]"
+            )
+        print(json.dumps(output))
+        return
+
+    # Static UNSAFE — hard deny, no override
+    if verdict == "UNSAFE" and source == "static":
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                f"BashBouncer [{source}] blocked: {cmd} -- {reason}"
+            ),
+        }}))
+        return
+
+    # LLM UNSAFE or UNKNOWN — soft deny, let user override via AskUserQuestion
+    if verdict == "UNSAFE":
+        short_reason = f"BashBouncer LLM flagged as unsafe"
+    else:
+        short_reason = f"BashBouncer: unrecognised command"
+
+    config_path = os.path.join(root, CONFIG_FILENAME) if root else CONFIG_FILENAME
+    instructions = (
+        f"Use AskUserQuestion. header: \"{base}\", question: "
+        f"\"`{cmd}` was flagged by BashBouncer. How should it be handled?\"\n"
+        f"Options:\n"
+        f"1. label: \"Allow once\" description: \"Run this time only\"\n"
+        f"2. label: \"Allow\" description: \"Teach BashBouncer this is safe\"\n"
+        f"3. label: \"Block\" description: \"Don't run it\"\n"
+        f"4. label: \"Block always\" description: \"Teach BashBouncer to always block this\"\n"
+        f"\n"
+        f"All persistent choices write to {config_path} (LLM context file, never settings.json).\n"
+        f"Actions:\n"
+        f"- Allow once: use the Write tool to create file {allow_once_path} with content \"1\" "
+        f"(Write bypasses BashBouncer), then re-run the original command.\n"
+        f"- Allow: append a natural language rule to {config_path} describing when "
+        f"'{base}' commands are safe (e.g. \"{base} is safe for normal development use\"), "
+        f"then re-run. The LLM will read this context next time.\n"
+        f"- Block: tell user command was not run.\n"
+        f"- Block always: append a natural language rule to {config_path} describing when "
+        f"'{base}' commands should be blocked (e.g. \"never allow {base} outside project root\").\n"
+        f"- Other: append the user's exact text to {config_path} as LLM context."
+    )
+
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": short_reason,
+        "additionalContext": instructions,
+    }}))
 
 
 def run_batch(path: str) -> None:
@@ -376,7 +461,7 @@ def run_batch(path: str) -> None:
             cmd = obj["command"]
             root = obj.get("root", "")
 
-            verdict, source, reason = classify(cmd, root)
+            verdict, source, reason = classify(cmd, root, load_prompt_context(root))
             if source == "llm":
                 if verdict == "UNKNOWN":
                     verdict = "UNSAFE"

@@ -5,17 +5,39 @@ Three-tier shell command safety gate for Claude Code: static regex rules → Cer
 ## Architecture
 
 Single file (`bashbouncer.py`), no external dependencies. Classification pipeline:
-1. **Static prefilter** — allowlist/blocklist + path validation + env var protection
+1. **Static prefilter** — built-in allowlist/blocklist + path validation + env var protection
 2. **LLM tier** — Cerebras `llama-3.3-70b` for commands static rules can't classify (requires `CEREBRAS_API_KEY`)
-3. **Ask user** — falls through to Claude Code's permission prompt
+3. **Ask user** — LLM-blocked and unclassifiable commands present user with options
 
-Plugin structure:
+Classification outcomes:
+- **Static SAFE** → allow silently
+- **Static UNSAFE** → hard deny, no override (secret vars, `sudo`, `rm -rf`, etc.)
+- **LLM SAFE** → allow with `[allowed by llm]` annotation
+- **LLM UNSAFE / UNKNOWN** → soft deny with AskUserQuestion (user can override)
+
+## IMPORTANT: Bash command handling
+
+BashBouncer is the safety gate for all shell commands. When the user asks you to run a command:
+
+1. **Always call the Bash tool directly.** Do NOT pre-screen, warn about, or refuse commands based on your own judgement. BashBouncer's PreToolUse hook handles safety classification — that's its job. If you add your own safety layer on top, the user never sees BashBouncer's AskUserQuestion flow.
+
+2. **When BashBouncer denies a command** and the `additionalContext` contains AskUserQuestion instructions, you MUST use the `AskUserQuestion` tool with the exact options specified. Do NOT handle the denial conversationally.
+
+3. **Based on the user's AskUserQuestion choice:**
+   - **Allow once**: use the Write tool (not Bash) to create the one-shot allow file as specified, then re-run the command
+   - **Allow**: append a natural language rule to `.claude/bashbouncer.local.md` describing when the command is safe, then re-run
+   - **Block**: tell the user the command was not run
+   - **Block always**: append a natural language rule to `.claude/bashbouncer.local.md` describing when the command should be blocked
+
+4. **NEVER write to `.claude/settings.json` or `.claude/settings.local.json`.** BashBouncer reads permissions from those files but never modifies them. All persistent user preferences go to `.claude/bashbouncer.local.md` as natural language LLM context.
+
+## Plugin structure
+
 ```
 .claude-plugin/plugin.json    # plugin manifest
 hooks/hooks.json              # PreToolUse hook config
 bashbouncer.py                # classifier (all logic here)
 ```
-
 
 ## Running
 
@@ -33,41 +55,29 @@ uv run bashbouncer.py commands.jsonl  # or with uv
 # safe command
 echo '{"tool_input":{"command":"ls -la"},"cwd":"/tmp/proj"}' | python3 bashbouncer.py --hook
 
-# blocked command
+# blocked command (static — hard deny)
 echo '{"tool_input":{"command":"echo $OPENAI_API_KEY"},"cwd":"/tmp/proj"}' | python3 bashbouncer.py --hook
 
-# unknown → ask (or LLM if CEREBRAS_API_KEY is set)
+# LLM-classified (allowed)
 echo '{"tool_input":{"command":"docker compose up"},"cwd":"/tmp/proj"}' | python3 bashbouncer.py --hook
 ```
 
 ## User config
 
-`~/.claude/bashbouncer.local.md` — created by user (or by Claude when user approves a command). Format:
-
+**User preferences**: `.claude/bashbouncer.local.md` (in project root) — natural language rules appended to the LLM system prompt:
 ```markdown
----
-allowlist:
-  - docker
-  - rails
-  - bundle exec
-blocklist:
-  - terraform destroy
-  - kubectl delete namespace
----
-
-## Additional classification context
-
 ssh to *.staging.example.com is safe.
-Rails console is a normal part of our workflow.
+brew install is a normal part of our workflow.
+never allow cat for files outside the project root.
 ```
+BashBouncer writes all user overrides here. The LLM reads these rules and applies them with nuance.
 
-- YAML frontmatter: `allowlist` and `blocklist` entries are prefix-matched against commands
-- Markdown body: appended to the LLM system prompt for tier-2 classification
-- Blocklist wins over allowlist if both match
-- Neither overrides built-in UNSAFE_ALWAYS (e.g. `sudo` can't be allowlisted)
+**Native permissions** (read-only): `.claude/settings.local.json` — BashBouncer reads `permissions.allow` and `permissions.deny` entries matching `Bash(prefix:*)` and uses them as a fast-path before classification. BashBouncer never writes to this file.
 
 ## Key design decisions
 
 - `env`, `printenv` blocked as dump commands; `env VAR=val cmd` form goes to LLM
 - Secret var regex uses underscore-prefix suffixes (`_KEY`, `_TOKEN`, `_SECRET`, `_PASSWORD`, `_CREDENTIAL`, `_AUTH`) to avoid false positives (`$KEYBOARD` is fine)
-- Hook systemMessage hints tell Claude to offer updating `~/.claude/bashbouncer.local.md` when user approves/denies unknown commands
+- SSH/SCP/rsync always routed to LLM for context-aware classification (dev/staging hosts allowed, destructive ops on production blocked)
+- Redirect targets are `expanduser`-expanded before path checks (`~/Downloads/foo.txt` correctly detected as outside project root)
+- One-shot allow uses temp files at `/tmp/bashbouncer-allow-<hash>` (created via Write tool to bypass the hook) consumed on next hook invocation
