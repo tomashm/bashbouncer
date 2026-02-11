@@ -10,8 +10,10 @@ import urllib.request
 API = "https://api.cerebras.ai/v1/chat/completions"
 API_KEY = os.environ.get("CEREBRAS_API_KEY", "")
 
-SAFE_CMDS = frozenset(
-    "echo printf date whoami pwd uname hostname uptime id groups env printenv "
+# --- Built-in command lists ---
+
+SAFE_CMDS = set(
+    "echo printf date whoami pwd uname hostname uptime id groups "
     "df du wc file which where type stat head tail cat less more ls dir find fd "
     "rg grep egrep fgrep diff cmp comm ps top htop pgrep lsof free vmstat iostat "
     "w who last finger man whatis apropos help true false test sort uniq tr cut "
@@ -19,7 +21,7 @@ SAFE_CMDS = frozenset(
     "hexdump strings md5sum sha256sum sha1sum cksum b2sum nproc arch getconf".split()
 )
 
-UNSAFE_ALWAYS = frozenset(
+UNSAFE_ALWAYS = set(
     "sudo su shutdown reboot halt poweroff "
     "mount umount fdisk parted mkfs dd "
     "useradd userdel usermod groupadd crontab at "
@@ -33,6 +35,63 @@ FILE_OPS = frozenset(
 READ_CMDS = frozenset(
     "cat head tail less more strings xxd hexdump od".split()
 )
+
+ENV_DUMP_CMDS = frozenset(("env", "printenv"))
+
+# Matches $VAR or ${VAR} where VAR contains secret-like suffixes
+SECRET_VAR_RE = re.compile(
+    r"\$\{?[A-Z_]*(API_KEY|_KEY|_TOKEN|_SECRET|_PASSWORD|_CREDENTIAL|_AUTH)\}?"
+)
+
+PROC_ENVIRON_RE = re.compile(r"/proc/(\d+|self)/environ")
+
+# --- User config ---
+
+CONFIG_PATH = os.path.expanduser("~/.claude/bashbouncer.local.md")
+
+
+def load_config() -> tuple[list[str], list[str], str]:
+    """Load user config from ~/.claude/bashbouncer.local.md.
+
+    Returns (allowlist, blocklist, prompt_context).
+    """
+    if not os.path.exists(CONFIG_PATH):
+        return [], [], ""
+
+    with open(CONFIG_PATH) as f:
+        text = f.read()
+
+    if not text.startswith("---"):
+        return [], [], text.strip()
+
+    parts = text.split("---", 2)
+    yaml_text = parts[1] if len(parts) > 1 else ""
+    body = parts[2].strip() if len(parts) > 2 else ""
+
+    allowlist: list[str] = []
+    blocklist: list[str] = []
+    current_key: str | None = None
+
+    for line in yaml_text.split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.endswith(":") and not stripped.startswith("-"):
+            current_key = stripped[:-1].strip()
+        elif stripped.startswith("- "):
+            value = stripped[2:].strip()
+            if current_key == "allowlist":
+                allowlist.append(value)
+            elif current_key == "blocklist":
+                blocklist.append(value)
+
+    return allowlist, blocklist, body
+
+
+USER_ALLOWLIST, USER_BLOCKLIST, USER_PROMPT_CONTEXT = load_config()
+
+
+# --- Helpers ---
 
 
 def is_within_root(path: str, root: str) -> bool:
@@ -97,7 +156,36 @@ def check_reads_outside_root(segment: str, root: str) -> str | None:
     return None
 
 
+def matches_prefix_list(segment: str, prefix_list: list[str]) -> str | None:
+    """Check if segment starts with any entry in prefix_list."""
+    seg = segment.strip()
+    for entry in prefix_list:
+        if seg == entry or seg.startswith(entry + " "):
+            return entry
+    return None
+
+
+def has_non_flag_args(segment: str) -> bool:
+    """Check if segment has non-flag arguments after the command."""
+    try:
+        parts = shlex.split(segment)
+    except ValueError:
+        return False
+    return any(not a.startswith("-") for a in parts[1:])
+
+
+# --- Classification ---
+
+
 def prefilter(cmd: str, root: str) -> tuple[str, str]:
+    # Secret variable references — check before subshell detection
+    if SECRET_VAR_RE.search(cmd):
+        return "UNSAFE", "references secret environment variable"
+
+    # /proc/*/environ access
+    if PROC_ENVIRON_RE.search(cmd):
+        return "UNSAFE", "reads process environment file"
+
     # Subshells / command substitution -> UNKNOWN
     if re.search(r"\$\(|`|<\(|>\(", cmd):
         return "UNKNOWN", "contains subshell or command substitution"
@@ -119,6 +207,11 @@ def prefilter(cmd: str, root: str) -> tuple[str, str]:
             continue
         base = get_base_cmd(seg)
 
+        # User blocklist (prefix match) — checked first
+        blocked = matches_prefix_list(seg, USER_BLOCKLIST)
+        if blocked:
+            return "UNSAFE", f"'{blocked}' is on your block list"
+
         if base in UNSAFE_ALWAYS:
             return "UNSAFE", f"'{base}' is on the block list"
 
@@ -127,9 +220,19 @@ def prefilter(cmd: str, root: str) -> tuple[str, str]:
             if "r" in flags and "f" in flags:
                 return "UNSAFE", "'rm -rf' is never allowed, use 'mv <target> /tmp/' instead"
 
+        # Env dump commands
+        if base in ENV_DUMP_CMDS:
+            if not has_non_flag_args(seg):
+                return "UNSAFE", f"'{base}' dumps environment variables including secrets"
+            return "UNKNOWN", f"'{base}' may dump environment variables"
+
         if base in FILE_OPS:
             if not root or not check_paths_in_root(seg, root):
                 return "UNSAFE", f"'{base}' writes outside project root"
+            continue
+
+        # User allowlist (prefix match) — skip further checks for this segment
+        if matches_prefix_list(seg, USER_ALLOWLIST):
             continue
 
         if base not in SAFE_CMDS:
@@ -151,26 +254,28 @@ def classify_llm(cmd: str, root: str) -> tuple[str, str]:
     if not API_KEY:
         return "UNKNOWN", "no CEREBRAS_API_KEY set"
     try:
+        system_prompt = (
+            "Classify a shell command run by a developer in a project directory.\n"
+            "SAFE: normal dev workflow — git (status/diff/log/add/commit/push/pull/checkout/branch), "
+            "docker/compose (ps/up/build/run/logs), package managers (npm/yarn/pnpm/pip/cargo/bun install/run/test), "
+            "build tools (make/gcc/cmake), cloud CLIs reading data (gcloud/aws/az logs/describe/list), "
+            "curl/wget for APIs, ssh to known hosts, test runners, linters, formatters.\n"
+            "UNSAFE: destructive git (push --force, reset --hard, clean -f); "
+            "reads sensitive files outside root (cat ~/.ssh/id_rsa, cat /etc/shadow); "
+            "commands that dump or exfiltrate environment variables (env, printenv, echo $SECRET_KEY); "
+            "docker --privileged or mounting host root; "
+            "cloud CLIs that modify infrastructure (delete/destroy/terminate); "
+            "curl posting local files to external hosts; system-wide package installs (apt install, brew install).\n"
+            "UNKNOWN: only if genuinely ambiguous.\n"
+            "Reply with exactly one word."
+        )
+        if USER_PROMPT_CONTEXT:
+            system_prompt += f"\n\nAdditional context from the user:\n{USER_PROMPT_CONTEXT}"
+
         body = json.dumps({
             "model": "llama-3.3-70b",
             "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Classify a shell command run by a developer in a project directory.\n"
-                        "SAFE: normal dev workflow — git (status/diff/log/add/commit/push/pull/checkout/branch), "
-                        "docker/compose (ps/up/build/run/logs), package managers (npm/yarn/pnpm/pip/cargo/bun install/run/test), "
-                        "build tools (make/gcc/cmake), cloud CLIs reading data (gcloud/aws/az logs/describe/list), "
-                        "curl/wget for APIs, ssh to known hosts, test runners, linters, formatters.\n"
-                        "UNSAFE: destructive git (push --force, reset --hard, clean -f); "
-                        "reads sensitive files outside root (cat ~/.ssh/id_rsa, cat /etc/shadow); "
-                        "docker --privileged or mounting host root; "
-                        "cloud CLIs that modify infrastructure (delete/destroy/terminate); "
-                        "curl posting local files to external hosts; system-wide package installs (apt install, brew install).\n"
-                        "UNKNOWN: only if genuinely ambiguous.\n"
-                        "Reply with exactly one word."
-                    ),
-                },
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Root: {root}\nCommand: {cmd}"},
             ],
             "temperature": 0,
@@ -182,7 +287,7 @@ def classify_llm(cmd: str, root: str) -> tuple[str, str]:
             headers={
                 "Authorization": f"Bearer {API_KEY}",
                 "Content-Type": "application/json",
-                "User-Agent": "bashbouncer/0.1",
+                "User-Agent": "bashbouncer/0.2",
             },
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -210,6 +315,9 @@ def classify(cmd: str, root: str) -> tuple[str, str, str]:
     return verdict, "static", reason
 
 
+# --- Entry points ---
+
+
 def run_hook() -> None:
     raw = sys.stdin.read().strip()
     if not raw:
@@ -233,10 +341,19 @@ def run_hook() -> None:
     decision = {"SAFE": "allow", "UNSAFE": "deny"}.get(verdict, "ask")
     output: dict = {"hookSpecificOutput": {"permissionDecision": decision}}
 
+    base = get_base_cmd(cmd)
+
     if decision == "deny":
         output["systemMessage"] = f"BashBouncer [{source}] blocked: {cmd} -- {reason}"
     elif decision == "ask":
-        output["systemMessage"] = f"BashBouncer [{source}] unsure: {cmd} -- {reason}"
+        msg = f"BashBouncer [{source}] unsure: {cmd} -- {reason}"
+        if not API_KEY:
+            msg += ". Tip: export CEREBRAS_API_KEY in your shell profile for auto-classification"
+        msg += (
+            f". If the user approves this command, offer to add '{base}' to their "
+            f"BashBouncer allowlist at ~/.claude/bashbouncer.local.md so they won't be asked again."
+        )
+        output["systemMessage"] = msg
 
     print(json.dumps(output))
 

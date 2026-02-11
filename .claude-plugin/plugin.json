@@ -1,0 +1,5 @@
+{
+  "name": "bashbouncer",
+  "description": "Three-tier shell command safety gate: static rules, LLM, ask user",
+  "version": "0.1.0"
+}
