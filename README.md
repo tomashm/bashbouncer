@@ -1,6 +1,6 @@
 # BashBouncer
 
-A shell command safety gate for Claude Code. Intercepts every Bash call before it runs.
+A shell command safety gate for Claude Code that learns as you use it. Intercepts every Bash call before it runs.
 
 For those who run `claude --dangerously-skip-permissions` but still want a safety net.
 
@@ -59,11 +59,7 @@ command ──► prefix rules ──► LLM ──► ask you
             allow/deny     allow/deny  allow/deny
 ```
 
-**Prefix rules** are checked first — zero latency. Sources:
-- `Bash(prefix:*)` entries from Claude Code's settings files (all four: `<project>/.claude/settings.local.json`, `<project>/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.claude/settings.json`)
-- Allowlist/blocklist in `.claude/bashbouncer.local.md` frontmatter
-
-Prefix matches are hard allow/deny — no LLM call, no user prompt.
+**Prefix rules** are checked first — zero latency. Reads `Bash(prefix:*)` entries from Claude Code's settings files (all four: `<project>/.claude/settings.local.json`, `<project>/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.claude/settings.json`). Prefix matches are hard allow/deny — no LLM call, no user prompt.
 
 **LLM classification** handles everything else — destructive git flags, secret variable references, file ops outside project root, cloud CLI mutations, system-wide installs. Uses Cerebras for fast, cheap inference. LLM memory is managed in `.claude/bashbouncer.local.md`.
 
@@ -80,28 +76,12 @@ When BashBouncer isn't sure, Claude asks you to allow or deny. If you allow, it 
 Create `.claude/bashbouncer.local.md` in your project root:
 
 ```markdown
----
-allowlist:
-  - docker
-  - rails
-  - bundle exec
-  - terraform plan
-blocklist:
-  - terraform destroy
-  - kubectl delete namespace
----
-
-## Additional context
-
 ssh to *.staging.example.com is safe.
 Rails console is a normal part of our workflow.
+Never allow terraform destroy.
 ```
 
-**Allowlist/blocklist** entries are prefix-matched. `docker` matches `docker ps`, `docker compose up`, etc. `terraform plan` matches `terraform plan -out=foo` but not `terraform apply`.
-
-**The markdown body** (after the `---`) gives the LLM extra context for classification. Write project-specific knowledge that prefix rules can't capture.
-
-Blocklist wins over allowlist.
+This file is passed as additional context to the LLM classifier. Write project-specific knowledge in natural language — the LLM reads it and applies it with nuance.
 
 ## Installation
 

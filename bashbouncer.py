@@ -16,45 +16,17 @@ API_KEY = os.environ.get("CEREBRAS_API_KEY", "")
 CONFIG_FILENAME = ".claude/bashbouncer.local.md"
 
 
-def load_user_config(root: str) -> tuple[list[str], list[str], str]:
+def load_user_config(root: str) -> str:
     """Load user config from {root}/.claude/bashbouncer.local.md.
 
-    Returns (allowlist, blocklist, prompt_context).
-    Frontmatter allowlist/blocklist entries are prefix-matched against commands.
-    Markdown body is passed as additional LLM classification context.
+    Returns the file contents as LLM classification context.
     """
     path = os.path.join(root, CONFIG_FILENAME) if root else ""
     if not path or not os.path.exists(path):
-        return [], [], ""
+        return ""
 
     with open(path) as f:
-        text = f.read()
-
-    if not text.startswith("---"):
-        return [], [], text.strip()
-
-    parts = text.split("---", 2)
-    prompt_context = parts[2].strip() if len(parts) > 2 else ""
-
-    # Parse simple YAML list format (no PyYAML dependency):
-    #   allowlist:
-    #     - docker
-    #     - rails
-    allowlist: list[str] = []
-    blocklist: list[str] = []
-    current_key: list[str] | None = None
-    for line in parts[1].splitlines():
-        stripped = line.strip()
-        if stripped == "allowlist:":
-            current_key = allowlist
-        elif stripped == "blocklist:":
-            current_key = blocklist
-        elif stripped.startswith("- ") and current_key is not None:
-            current_key.append(stripped[2:].strip())
-        elif stripped and not stripped.startswith("#"):
-            current_key = None
-
-    return allowlist, blocklist, prompt_context
+        return f.read().strip()
 
 
 def load_user_permissions(cwd: str) -> tuple[list[str], list[str]]:
@@ -224,14 +196,12 @@ def run_hook() -> None:
         }}))
         return
 
-    # Load user config (frontmatter allowlist/blocklist + LLM context)
-    config_allow, config_block, prompt_context = load_user_config(root)
+    # Load user config (LLM context)
+    prompt_context = load_user_config(root)
 
-    # Check user permissions from settings files + frontmatter
+    # Check user permissions from settings files
     base = get_base_cmd(cmd)
     user_allow, user_deny = load_user_permissions(root)
-    user_deny.extend(config_block)
-    user_allow.extend(config_allow)
 
     # Deny wins over allow
     for prefix in user_deny:
@@ -320,7 +290,7 @@ def run_batch(path: str) -> None:
             cmd = obj["command"]
             root = obj.get("root", "")
 
-            _, _, prompt_context = load_user_config(root)
+            prompt_context = load_user_config(root)
             verdict, reason = classify(cmd, root, prompt_context)
             if verdict == "UNKNOWN":
                 verdict = "UNSAFE"

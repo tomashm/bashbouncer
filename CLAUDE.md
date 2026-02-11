@@ -5,7 +5,7 @@ Two-tier shell command safety gate for Claude Code: settings.json fast-path → 
 ## Architecture
 
 Single file (`bashbouncer.py`), no external dependencies. Classification pipeline:
-1. **Settings.json fast-path** — reads `Bash(prefix:*)` allow/deny entries from all four Claude Code settings files + frontmatter allowlist/blocklist
+1. **Settings.json fast-path** — reads `Bash(prefix:*)` allow/deny entries from all four Claude Code settings files
 2. **LLM tier** — Cerebras `llama-3.3-70b` for all commands not matched by settings (requires `CEREBRAS_API_KEY`)
 3. **Ask user** — LLM-blocked and unclassifiable commands present user with options
 
