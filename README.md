@@ -73,7 +73,7 @@ When BashBouncer isn't sure, Claude asks you to allow or deny. If you allow, it 
 
 ## Customizing rules
 
-Create `.claude/bashbouncer.local.md` in your project root:
+Create `.claude/bashbouncer.local.md` in your project root, or just let BashBouncer update this file for you as you allow/block commands:
 
 ```markdown
 ssh to *.staging.example.com is safe.
