@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import sys
+import time
 import urllib.request
 
 API = "https://api.cerebras.ai/v1/chat/completions"
@@ -380,12 +381,18 @@ def run_hook() -> None:
         print('Expected: {"tool_input": {"command": "..."}, "cwd": "..."}  # cwd is optional', file=sys.stderr)
         sys.exit(1)
     root = hook_input.get("cwd", "")
+    t0 = time.perf_counter()
+
+    def _tag(source: str = "") -> str:
+        ms = (time.perf_counter() - t0) * 1000
+        return f"bashbouncer · {source} · {ms:.0f}ms" if source else f"bashbouncer · {ms:.0f}ms"
 
     # Check one-shot allow before classification
     if consume_allow_once(cmd):
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow",
+            "permissionDecisionReason": _tag(),
         }}))
         return
 
@@ -412,21 +419,18 @@ def run_hook() -> None:
             print(json.dumps({"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow",
+                "permissionDecisionReason": _tag(),
             }}))
             return
     verdict, source, reason = classify(cmd, root, prompt_context)
     allow_once_path = _allow_once_path(cmd)
 
     if verdict == "SAFE":
-        output: dict = {"hookSpecificOutput": {
+        print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow",
-        }}
-        if source == "llm":
-            output["hookSpecificOutput"]["permissionDecisionReason"] = (
-                f"[allowed by {source}]"
-            )
-        print(json.dumps(output))
+            "permissionDecisionReason": _tag(source if source == "llm" else ""),
+        }}))
         return
 
     # Static UNSAFE — hard deny, no override
