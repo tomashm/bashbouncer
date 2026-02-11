@@ -4,48 +4,12 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import sys
 import time
 import urllib.request
 
 API = "https://api.cerebras.ai/v1/chat/completions"
 API_KEY = os.environ.get("CEREBRAS_API_KEY", "")
-
-# --- Built-in command lists ---
-
-SAFE_CMDS = set(
-    "echo printf date whoami pwd uname hostname uptime id groups "
-    "df du wc file which where type stat head tail cat less more ls dir find fd "
-    "rg grep egrep fgrep diff cmp comm ps top htop pgrep lsof free vmstat iostat "
-    "w who last finger man whatis apropos help true false test sort uniq tr cut "
-    "awk sed seq basename dirname realpath readlink tput column fmt nl od xxd "
-    "hexdump strings md5sum sha256sum sha1sum cksum b2sum nproc arch getconf".split()
-)
-
-UNSAFE_ALWAYS = set(
-    "sudo su shutdown reboot halt poweroff "
-    "mount umount fdisk parted mkfs dd "
-    "useradd userdel usermod groupadd crontab at "
-    "systemctl service launchctl defaults dscl".split()
-)
-
-FILE_OPS = frozenset(
-    "rm rmdir mv cp chmod chown chgrp ln unlink truncate shred tee touch mkdir".split()
-)
-
-READ_CMDS = frozenset(
-    "cat head tail less more strings xxd hexdump od".split()
-)
-
-ENV_DUMP_CMDS = frozenset(("env", "printenv"))
-
-# Matches $VAR or ${VAR} where VAR contains secret-like suffixes
-SECRET_VAR_RE = re.compile(
-    r"\$\{?[A-Z_]*(API_KEY|_KEY|_TOKEN|_SECRET|_PASSWORD|_CREDENTIAL|_AUTH)\}?"
-)
-
-PROC_ENVIRON_RE = re.compile(r"/proc/(\d+|self)/environ")
 
 # --- User config ---
 
@@ -138,158 +102,14 @@ def load_user_permissions(cwd: str) -> tuple[list[str], list[str]]:
 # --- Helpers ---
 
 
-def is_within_root(path: str, root: str) -> bool:
-    root = os.path.normpath(root)
-    path = os.path.expanduser(path)
-    if not os.path.isabs(path):
-        path = os.path.join(root, path)
-    path = os.path.normpath(path)
-    return path == root or path.startswith(root + os.sep)
-
-
-def check_paths_in_root(segment: str, root: str) -> bool:
-    try:
-        parts = shlex.split(segment)
-    except ValueError:
-        return False
-    if not parts:
-        return False
-    args = [a for a in parts[1:] if not a.startswith("-")]
-    if not args:
-        return False
-    return all(is_within_root(a, root) for a in args)
-
-
-def get_base_cmd(segment: str) -> str:
-    return segment.strip().split()[0] if segment.strip() else ""
-
-
-def has_dotpath(path: str) -> bool:
-    return any(p.startswith(".") and p not in (".", "..") for p in os.path.normpath(path).split(os.sep))
-
-
-def check_dotpath_args(segment: str, root: str) -> str | None:
-    try:
-        parts = shlex.split(segment)
-    except ValueError:
-        return None
-    for arg in parts[1:]:
-        if arg.startswith("-"):
-            continue
-        expanded = os.path.expanduser(arg)
-        if not os.path.isabs(expanded) and root:
-            expanded = os.path.join(root, expanded)
-        expanded = os.path.normpath(expanded)
-        if has_dotpath(expanded) and (not root or not is_within_root(expanded, root)):
-            return arg
-    return None
-
-
-def check_reads_outside_root(segment: str, root: str) -> str | None:
-    try:
-        parts = shlex.split(segment)
-    except ValueError:
-        return None
-    for arg in parts[1:]:
-        if arg.startswith("-"):
-            continue
-        expanded = os.path.expanduser(arg)
-        if not os.path.isabs(expanded):
-            continue
-        if not is_within_root(expanded, root):
-            return arg
-    return None
-
-
-def has_non_flag_args(segment: str) -> bool:
-    """Check if segment has non-flag arguments after the command."""
-    try:
-        parts = shlex.split(segment)
-    except ValueError:
-        return False
-    return any(not a.startswith("-") for a in parts[1:])
+def get_base_cmd(cmd: str) -> str:
+    return cmd.strip().split()[0] if cmd.strip() else ""
 
 
 # --- Classification ---
 
 
-def prefilter(cmd: str, root: str) -> tuple[str, str]:
-    # Secret variable references — check before subshell detection
-    if SECRET_VAR_RE.search(cmd):
-        return "UNSAFE", "references secret environment variable"
-
-    # /proc/*/environ access
-    if PROC_ENVIRON_RE.search(cmd):
-        return "UNSAFE", "reads process environment file"
-
-    # Subshells / command substitution -> UNKNOWN
-    if re.search(r"\$\(|`|<\(|>\(", cmd):
-        return "UNKNOWN", "contains subshell or command substitution"
-
-    # Redirects: check target against root
-    # Match >, >>, 2>, 2>> etc. Exclude trailing ; & | from target.
-    for redir in re.finditer(r"\d?>>?\s*([^\s;&|]+)", cmd):
-        target = os.path.expanduser(redir.group(1))
-        if target == "/dev/null":
-            continue
-        if root and is_within_root(target, root):
-            continue
-        return "UNSAFE", f"redirect target '{target}' outside project root"
-
-    # Split on pipes / chains
-    segments = re.split(r"[|;&]{1,2}", cmd)
-
-    for seg in segments:
-        seg = seg.strip()
-        if not seg:
-            continue
-        base = get_base_cmd(seg)
-
-        if base in UNSAFE_ALWAYS:
-            return "UNSAFE", f"'{base}' is on the block list"
-
-        if base == "rm":
-            short_flags = set()
-            has_recursive = False
-            for a in seg.split()[1:]:
-                if a == "--recursive":
-                    has_recursive = True
-                elif a.startswith("-") and not a.startswith("--"):
-                    short_flags.update(a[1:])
-            if ("r" in short_flags or has_recursive) and "f" in short_flags:
-                return "UNSAFE", "'rm -rf' is never allowed, use 'mv <target> /tmp/' instead"
-
-        # Env dump commands
-        if base in ENV_DUMP_CMDS:
-            if not has_non_flag_args(seg):
-                return "UNSAFE", f"'{base}' dumps environment variables including secrets"
-            return "UNKNOWN", f"'{base}' may dump environment variables"
-
-        # SSH/SCP/rsync: always route through LLM for context-aware classification
-        if base in ("ssh", "scp", "rsync"):
-            return "UNKNOWN", f"'{base}' runs commands on remote hosts"
-
-        if base in FILE_OPS:
-            if not root or not check_paths_in_root(seg, root):
-                return "UNSAFE", f"'{base}' writes outside project root"
-            continue
-
-        if base not in SAFE_CMDS:
-            return "UNKNOWN", f"'{base}' not in allow/block lists"
-
-        dotarg = check_dotpath_args(seg, root)
-        if dotarg is not None:
-            return "UNKNOWN", f"accesses dotpath '{dotarg}' outside project root"
-
-        if base in READ_CMDS and root:
-            outside = check_reads_outside_root(seg, root)
-            if outside is not None:
-                return "UNKNOWN", f"reads '{outside}' outside project root"
-
-    return "SAFE", "all commands on the allow list"
-
-
-def classify_llm(cmd: str, root: str, prompt_context: str = "") -> tuple[str, str]:
+def classify(cmd: str, root: str, prompt_context: str = "") -> tuple[str, str]:
     if not API_KEY:
         return "UNKNOWN", "no CEREBRAS_API_KEY set"
     try:
@@ -298,11 +118,18 @@ def classify_llm(cmd: str, root: str, prompt_context: str = "") -> tuple[str, st
             "SAFE: normal dev workflow — git (status/diff/log/add/commit/push/pull/checkout/branch), "
             "docker/compose (ps/up/build/run/logs), package managers (npm/yarn/pnpm/pip/cargo/bun install/run/test), "
             "build tools (make/gcc/cmake), cloud CLIs reading data (gcloud/aws/az logs/describe/list), "
-            "curl/wget for APIs, ssh/scp to dev/staging/test hosts, test runners, linters, formatters.\n"
+            "curl/wget for APIs, ssh/scp to dev/staging/test hosts, test runners, linters, formatters, "
+            "read-only commands (ls, cat, grep, find, echo, date, wc, file, stat, head, tail, diff, ps).\n"
             "UNSAFE: destructive git (push --force, reset --hard, clean -f); "
+            "rm -rf (always unsafe, suggest mv to /tmp instead); "
+            "sudo, su, shutdown, reboot, mount, umount, dd, fdisk, mkfs, systemctl, launchctl; "
+            "commands referencing secret env vars ($API_KEY, $DB_PASSWORD, $SECRET_TOKEN, etc.); "
+            "env or printenv without arguments (dumps all secrets); "
+            "reading /proc/*/environ; "
             "ssh/scp with destructive commands on production hosts; "
             "reads sensitive files outside root (cat ~/.ssh/id_rsa, cat /etc/shadow); "
-            "commands that dump or exfiltrate environment variables (env, printenv, echo $SECRET_KEY); "
+            "file operations (rm, mv, cp, chmod, chown, ln, truncate, shred) targeting paths outside the project root; "
+            "redirect (>, >>) to files outside project root; "
             "docker --privileged or mounting host root; "
             "cloud CLIs that modify infrastructure (delete/destroy/terminate); "
             "curl posting local files to external hosts; system-wide package installs (apt install, brew install).\n"
@@ -347,14 +174,6 @@ def classify_llm(cmd: str, root: str, prompt_context: str = "") -> tuple[str, st
         return "UNKNOWN", f"LLM error: {e}"
 
 
-def classify(cmd: str, root: str, prompt_context: str = "") -> tuple[str, str, str]:
-    verdict, reason = prefilter(cmd, root)
-    if verdict == "UNKNOWN":
-        verdict, reason = classify_llm(cmd, root, prompt_context)
-        return verdict, "llm", reason
-    return verdict, "static", reason
-
-
 # --- Entry points ---
 
 
@@ -391,23 +210,24 @@ def run_hook() -> None:
     root = hook_input.get("cwd", "")
     t0 = time.perf_counter()
 
-    def _tag(source: str = "") -> str:
+    def _tag() -> str:
         ms = (time.perf_counter() - t0) * 1000
-        return f"bashbouncer · {source} · {ms:.0f}ms" if source else f"bashbouncer · {ms:.0f}ms"
+        return f"bashbouncer · llm · {ms:.0f}ms"
 
     # Check one-shot allow before classification
     if consume_allow_once(cmd):
+        ms = (time.perf_counter() - t0) * 1000
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow",
-            "permissionDecisionReason": _tag(),
+            "permissionDecisionReason": f"bashbouncer · {ms:.0f}ms",
         }}))
         return
 
     # Load user config (frontmatter allowlist/blocklist + LLM context)
     config_allow, config_block, prompt_context = load_user_config(root)
 
-    # Check user permissions from settings.local.json + frontmatter
+    # Check user permissions from settings files + frontmatter
     base = get_base_cmd(cmd)
     user_allow, user_deny = load_user_permissions(root)
     user_deny.extend(config_block)
@@ -424,35 +244,26 @@ def run_hook() -> None:
             return
     for prefix in user_allow:
         if cmd.strip() == prefix or cmd.strip().startswith(prefix + " "):
+            ms = (time.perf_counter() - t0) * 1000
             print(json.dumps({"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow",
-                "permissionDecisionReason": _tag(),
+                "permissionDecisionReason": f"bashbouncer · {ms:.0f}ms",
             }}))
             return
-    verdict, source, reason = classify(cmd, root, prompt_context)
+
+    verdict, reason = classify(cmd, root, prompt_context)
     allow_once_path = _allow_once_path(cmd)
 
     if verdict == "SAFE":
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow",
-            "permissionDecisionReason": _tag(source if source == "llm" else ""),
+            "permissionDecisionReason": _tag(),
         }}))
         return
 
-    # Static UNSAFE — hard deny, no override
-    if verdict == "UNSAFE" and source == "static":
-        print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": (
-                f"BashBouncer [{source}] blocked: {cmd} -- {reason}"
-            ),
-        }}))
-        return
-
-    # LLM UNSAFE or UNKNOWN — soft deny, let user override via AskUserQuestion
+    # UNSAFE or UNKNOWN — soft deny, let user override via AskUserQuestion
     if verdict == "UNSAFE":
         short_reason = "BashBouncer LLM flagged as unsafe"
     elif not API_KEY:
@@ -499,9 +310,6 @@ def run_batch(path: str) -> None:
         print(f"Error: not a file: {path}", file=sys.stderr)
         sys.exit(1)
 
-    regex_calls = 0
-    llm_calls = 0
-
     with open(path) as f:
         for line in f:
             line = line.strip()
@@ -513,17 +321,11 @@ def run_batch(path: str) -> None:
             root = obj.get("root", "")
 
             _, _, prompt_context = load_user_config(root)
-            verdict, source, reason = classify(cmd, root, prompt_context)
-            if source == "llm":
-                if verdict == "UNKNOWN":
-                    verdict = "UNSAFE"
-                llm_calls += 1
-            else:
-                regex_calls += 1
+            verdict, reason = classify(cmd, root, prompt_context)
+            if verdict == "UNKNOWN":
+                verdict = "UNSAFE"
 
-            print(json.dumps({"command": cmd, "root": root, "verdict": verdict, "source": source, "reason": reason}))
-
-    print(f"--- stats: regex={regex_calls}  llm={llm_calls} ---", file=sys.stderr)
+            print(json.dumps({"command": cmd, "root": root, "verdict": verdict, "reason": reason}))
 
 
 def main() -> None:

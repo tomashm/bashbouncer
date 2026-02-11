@@ -7,35 +7,27 @@ For those who run `claude --dangerously-skip-permissions` but still want a safet
 ## How it works
 
 ```
-command ──► settings.json ──► static rules ──► LLM ──► ask you
-                 │                  │            │          │
-             allow/deny        allow/block  allow/block  allow/block
+command ──► settings.json ──► LLM ──► ask you
+                 │              │          │
+             allow/deny    allow/block  allow/block
 ```
 
 **Settings.json permissions** are checked first. BashBouncer reads `Bash(prefix:*)` entries from Claude Code's own settings files (read-only — it never writes to them) and uses them as a fast-path. All four locations are checked: `<project>/.claude/settings.local.json`, `<project>/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.claude/settings.json`.
 
-**Static rules** handle the obvious cases instantly — `ls`, `git status`, `grep` run without interruption. `sudo`, `rm -rf`, `echo $API_KEY` get blocked.
+**LLM classification** handles everything else — destructive git flags, secret variable references, file ops outside project root, cloud CLI mutations, system-wide installs. Uses Cerebras for fast, cheap inference.
 
-**LLM classification** catches the nuanced stuff that regex can't — destructive git flags, cloud CLI mutations, system-wide installs. Uses Cerebras for fast, cheap inference.
-
-**Ask you** is the fallback. If neither tier is confident, you decide.
+**Ask you** is the fallback. If the LLM isn't confident or flags a command as unsafe, you decide. All denies are soft — you can always override.
 
 ## What gets blocked
 
 | Category | Examples |
 |----------|----------|
-| **Always blocked** | `sudo`, `rm -rf`, `env`/`printenv` (dumps secrets), `$API_KEY`/`$DB_PASSWORD`, `/proc/*/environ`, file ops outside project root |
-| **Blocked by LLM** | `git push --force`, `docker --privileged`, `aws s3 rm`, `terraform destroy`, `curl` posting local files, system-wide installs |
-| **Always allowed** | `ls`, `cat`, `grep`, `find`, `echo`, `date`, `wc`, `file`, `stat` |
+| **Blocked by LLM** | `sudo`, `rm -rf`, `echo $API_KEY`, `git push --force`, `docker --privileged`, `aws s3 rm`, `terraform destroy`, `env`/`printenv`, file ops outside project root |
+| **Always allowed** | `ls`, `cat`, `grep`, `find`, `echo`, `date`, `wc`, `file`, `stat` (when matched by settings.json prefix) |
 
 ## What you'll see
 
-**Nothing, most of the time.** Safe commands run silently.
-
-When something gets blocked:
-```
-BashBouncer [static] blocked: rm -rf node_modules -- 'rm -rf' is never allowed, use 'mv <target> /tmp/' instead
-```
+**Nothing, most of the time.** Commands matched by settings.json run silently. LLM-approved commands run with a subtle timing annotation.
 
 When BashBouncer isn't sure, Claude asks you to allow or deny. If you allow, it offers to remember your choice so you're not asked again.
 
@@ -63,9 +55,9 @@ Rails console is a normal part of our workflow.
 
 **Allowlist/blocklist** entries are prefix-matched. `docker` matches `docker ps`, `docker compose up`, etc. `terraform plan` matches `terraform plan -out=foo` but not `terraform apply`.
 
-**The markdown body** (after the `---`) gives the LLM extra context for classification. Write project-specific knowledge that static rules can't capture.
+**The markdown body** (after the `---`) gives the LLM extra context for classification. Write project-specific knowledge that prefix rules can't capture.
 
-Blocklist wins over allowlist. Neither overrides built-in blocks (`sudo`, `rm -rf`, etc. are always blocked).
+Blocklist wins over allowlist.
 
 ## Installation
 

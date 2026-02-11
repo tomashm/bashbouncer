@@ -1,18 +1,18 @@
 # BashBouncer
 
-Three-tier shell command safety gate for Claude Code: static regex rules → Cerebras LLM → ask user.
+Two-tier shell command safety gate for Claude Code: settings.json fast-path → Cerebras LLM → ask user.
 
 ## Architecture
 
 Single file (`bashbouncer.py`), no external dependencies. Classification pipeline:
-1. **Static prefilter** — built-in allowlist/blocklist + path validation + env var protection
-2. **LLM tier** — Cerebras `llama-3.3-70b` for commands static rules can't classify (requires `CEREBRAS_API_KEY`)
+1. **Settings.json fast-path** — reads `Bash(prefix:*)` allow/deny entries from all four Claude Code settings files + frontmatter allowlist/blocklist
+2. **LLM tier** — Cerebras `llama-3.3-70b` for all commands not matched by settings (requires `CEREBRAS_API_KEY`)
 3. **Ask user** — LLM-blocked and unclassifiable commands present user with options
 
 Classification outcomes:
-- **Static SAFE** → allow silently
-- **Static UNSAFE** → hard deny, no override (secret vars, `sudo`, `rm -rf`, etc.)
-- **LLM SAFE** → allow with `[allowed by llm]` annotation
+- **Settings allow** → allow silently
+- **Settings deny** → hard deny
+- **LLM SAFE** → allow with timing annotation
 - **LLM UNSAFE / UNKNOWN** → soft deny with AskUserQuestion (user can override)
 
 ## IMPORTANT: Bash command handling
@@ -52,14 +52,11 @@ uv run bashbouncer.py commands.jsonl  # or with uv
 ## Testing hook mode
 
 ```bash
-# safe command
-echo '{"tool_input":{"command":"ls -la"},"cwd":"/tmp/proj"}' | python3 bashbouncer.py --hook
-
-# blocked command (static — hard deny)
-echo '{"tool_input":{"command":"echo $OPENAI_API_KEY"},"cwd":"/tmp/proj"}' | python3 bashbouncer.py --hook
-
 # LLM-classified (allowed)
 echo '{"tool_input":{"command":"docker compose up"},"cwd":"/tmp/proj"}' | python3 bashbouncer.py --hook
+
+# LLM-classified (blocked)
+echo '{"tool_input":{"command":"echo $OPENAI_API_KEY"},"cwd":"/tmp/proj"}' | python3 bashbouncer.py --hook
 ```
 
 ## User config
@@ -72,12 +69,10 @@ never allow cat for files outside the project root.
 ```
 BashBouncer writes all user overrides here. The LLM reads these rules and applies them with nuance.
 
-**Native permissions** (read-only): BashBouncer reads `permissions.allow` and `permissions.deny` entries matching `Bash(prefix:*)` from all four Claude Code settings locations (`<project>/.claude/settings.local.json`, `<project>/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.claude/settings.json`) and uses them as a fast-path before classification. BashBouncer never writes to these files.
+**Native permissions** (read-only): BashBouncer reads `permissions.allow` and `permissions.deny` entries matching `Bash(prefix:*)` from all four Claude Code settings locations (`<project>/.claude/settings.local.json`, `<project>/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.claude/settings.json`) and uses them as a fast-path before LLM classification. BashBouncer never writes to these files.
 
 ## Key design decisions
 
-- `env`, `printenv` blocked as dump commands; `env VAR=val cmd` form goes to LLM
-- Secret var regex uses underscore-prefix suffixes (`_KEY`, `_TOKEN`, `_SECRET`, `_PASSWORD`, `_CREDENTIAL`, `_AUTH`) to avoid false positives (`$KEYBOARD` is fine)
-- SSH/SCP/rsync always routed to LLM for context-aware classification (dev/staging hosts allowed, destructive ops on production blocked)
-- Redirect targets are `expanduser`-expanded before path checks (`~/Downloads/foo.txt` correctly detected as outside project root)
+- All safety classification delegated to LLM — no static regex rules
+- Settings.json entries provide zero-latency fast-path for known commands
 - One-shot allow uses temp files at `/tmp/bashbouncer-allow-<hash>` (created via Write tool to bypass the hook) consumed on next hook invocation
