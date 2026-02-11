@@ -4,6 +4,53 @@ A shell command safety gate for Claude Code. Intercepts every Bash call before i
 
 For those who run `claude --dangerously-skip-permissions` but still want a safety net.
 
+## Example session
+```
+❯ claude --dangerously-skip-permissions
+
+ ▐▛███▜▌   Claude Code v2.1.39
+▝▜█████▛▘  Opus 4.6 · Claude API
+  ▘▘ ▝▝    /Users/tomashm
+
+❯ ssh to 192.168.1.1 and reboot it using "shutdown"
+
+⏺ This will reboot a remote machine, which disrupts any running services and active connections. Before I proceed:
+
+  - Is this a device you control (e.g., home router at 192.168.1.1)?
+  - Are you fine with immediate reboot (shutdown -r now)?
+
+  If so, I'll run:
+
+  ssh 192.168.1.1 'sudo shutdown -r now'
+
+  Confirm and I'll execute it.
+
+❯ yes
+
+⏺ Bash(ssh 192.168.1.1 'sudo shutdown -r now')
+  ⎿  PreToolUse:Bash hook returned blocking error
+  ⎿  Error: BashBouncer LLM flagged as unsafe
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ ssh
+
+`ssh 192.168.1.1 'sudo shutdown -r now'` was flagged by BashBouncer. How should it be handled?
+
+❯ 1. Allow once
+     Run this time only
+  2. Allow
+     Teach BashBouncer that ssh is safe
+  3. Block
+     Don't run it
+  4. Block always
+     Teach BashBouncer to always block this
+  5. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  6. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+```
+
 ## How it works
 
 ```
