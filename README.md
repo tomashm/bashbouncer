@@ -1,10 +1,8 @@
 # BashBouncer
 
+A shell command safety gate for Claude Code. Intercepts every Bash call before it runs.
+
 For those who run `claude --dangerously-skip-permissions` but still want a safety net.
-
-A shell command classifier for Claude Code that intercepts every Bash call before it runs.
-
-Every time Claude tries to execute a shell command, BashBouncer intercepts it and decides: allow silently, block with an explanation, or ask you.
 
 ## How it works
 
@@ -20,13 +18,13 @@ command ──► static rules ──► LLM (optional) ──► ask you
 
 **Ask you** is the fallback. If neither tier is confident, you decide.
 
-## Install
+## What gets blocked
 
-```
-claude plugins install bashbouncer
-```
-
-That's it. No config needed. BashBouncer starts intercepting commands immediately.
+| Category | Examples |
+|----------|----------|
+| **Always blocked** | `sudo`, `rm -rf`, `env`/`printenv` (dumps secrets), `$API_KEY`/`$DB_PASSWORD`, `/proc/*/environ`, file ops outside project root |
+| **Blocked by LLM** | `git push --force`, `docker --privileged`, `aws s3 rm`, `terraform destroy`, `curl` posting local files, system-wide installs |
+| **Always allowed** | `ls`, `cat`, `grep`, `find`, `echo`, `date`, `wc`, `file`, `stat` |
 
 ## What you'll see
 
@@ -37,22 +35,11 @@ When something gets blocked:
 BashBouncer [static] blocked: rm -rf node_modules -- 'rm -rf' is never allowed, use 'mv <target> /tmp/' instead
 ```
 
-When BashBouncer isn't sure, Claude Code asks you to allow or deny. If you allow, Claude will offer to remember your choice so you're not asked again.
-
-## Adding the LLM tier
-
-Without an API key, commands that static rules can't classify go straight to "ask you." If you're getting asked too often, add a Cerebras key:
-
-```bash
-# Add to your shell profile (~/.zshrc, ~/.bashrc, etc.)
-export CEREBRAS_API_KEY=your-key-here
-```
-
-Cerebras offers [free API keys](https://cloud.cerebras.ai/) with usage and rate limits — plenty for command classification.
+When BashBouncer isn't sure, Claude asks you to allow or deny. If you allow, it offers to remember your choice so you're not asked again.
 
 ## Customizing rules
 
-Create `~/.claude/bashbouncer.local.md` to add your own rules:
+Create `.claude/bashbouncer.local.md` in your project root:
 
 ```markdown
 ---
@@ -74,36 +61,34 @@ Rails console is a normal part of our workflow.
 
 **Allowlist/blocklist** entries are prefix-matched. `docker` matches `docker ps`, `docker compose up`, etc. `terraform plan` matches `terraform plan -out=foo` but not `terraform apply`.
 
-**The markdown body** (after the `---`) gives the LLM extra context for classification. Use it for project-specific knowledge that static rules can't capture.
+**The markdown body** (after the `---`) gives the LLM extra context for classification. Write project-specific knowledge that static rules can't capture.
 
-Rules stack: blocklist wins over allowlist. Neither overrides built-in blocks (`sudo`, `rm -rf`, etc. are always blocked).
+Blocklist wins over allowlist. Neither overrides built-in blocks (`sudo`, `rm -rf`, etc. are always blocked).
 
-## What gets blocked
+## Adding the LLM tier
 
-**Always blocked:**
-- `sudo`, `su`, `shutdown`, `reboot`, system administration commands
-- `rm -rf` (any target)
-- `env`, `printenv` without arguments (dumps secrets)
-- References to secret variables (`$API_KEY`, `$DB_PASSWORD`, `${AUTH_TOKEN}`, etc.)
-- `/proc/*/environ` access
-- File operations outside your project directory
+Without an API key, commands that static rules can't classify go straight to "ask you." Add a Cerebras key to reduce prompts:
 
-**Blocked by LLM** (when key is set):
-- `git push --force`, `git reset --hard`, `git clean -f`
-- `docker --privileged`, mounting host root
-- Cloud CLI mutations (`aws s3 rm`, `terraform destroy`, `gcloud delete`)
-- `curl` posting local files to external hosts
-- System-wide package installs (`apt install`, `brew install`)
+```bash
+# Add to your shell profile (~/.zshrc, ~/.bashrc, etc.)
+export CEREBRAS_API_KEY=your-key-here
+```
 
-**Always allowed:**
-- Read-only commands: `ls`, `cat`, `grep`, `find`, `diff`, `ps`, `top`
-- Output commands: `echo`, `printf`, `date`, `whoami`
-- File inspection: `wc`, `file`, `stat`, `md5sum`
+Cerebras offers [free API keys](https://cloud.cerebras.ai/) with generous limits — plenty for command classification.
 
-## How Claude learns your preferences
+## Installation
 
-When BashBouncer asks you about an unknown command and you allow it, Claude will offer:
+```bash
+# Add marketplace
+claude plugin marketplace add tomashm/bashbouncer
 
-> "Want me to add `docker` to your BashBouncer allowlist so you're not asked again?"
+# Install plugin
+claude plugin install bashbouncer@bashbouncer
 
-If you say yes, Claude edits `~/.claude/bashbouncer.local.md` for you. Over time, the "ask" prompts decrease as BashBouncer learns your workflow.
+# Update later
+claude plugin update bashbouncer@bashbouncer
+```
+
+## License
+
+MIT

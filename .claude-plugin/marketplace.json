@@ -1,0 +1,18 @@
+{
+  "name": "bashbouncer",
+  "owner": {
+    "name": "tomashm"
+  },
+  "metadata": {
+    "description": "Three-tier shell command safety gate for Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "bashbouncer",
+      "source": "./",
+      "description": "Three-tier shell command safety gate: static rules, LLM, ask user",
+      "homepage": "https://github.com/tomashm/bashbouncer",
+      "repository": "https://github.com/tomashm/bashbouncer"
+    }
+  ]
+}
