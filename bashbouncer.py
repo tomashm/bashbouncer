@@ -158,9 +158,18 @@ def _allow_once_path(cmd: str) -> str:
 
 
 def consume_allow_once(cmd: str) -> bool:
-    """Check for and consume a one-shot allow file. Returns True if found."""
+    """Check for and consume a one-shot allow file. Returns True if found.
+
+    Deletes files older than 60s to avoid stale allows. Does not delete
+    fresh files immediately — duplicate hook invocations (e.g. stale
+    plugin cache) need to all see the file within the same event.
+    """
+    path = _allow_once_path(cmd)
     try:
-        os.unlink(_allow_once_path(cmd))
+        age = time.time() - os.stat(path).st_mtime
+        if age > 60:
+            os.unlink(path)
+            return False
         return True
     except FileNotFoundError:
         return False
