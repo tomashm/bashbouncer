@@ -7,10 +7,12 @@ For those who run `claude --dangerously-skip-permissions` but still want a safet
 ## How it works
 
 ```
-command ──► static rules ──► LLM ──► ask you
-              │                │          │
-            allow/block   allow/block   allow/block
+command ──► settings.json ──► static rules ──► LLM ──► ask you
+                 │                  │            │          │
+             allow/deny        allow/block  allow/block  allow/block
 ```
+
+**Settings.json permissions** are checked first. BashBouncer reads `Bash(prefix:*)` entries from Claude Code's own settings files (read-only — it never writes to them) and uses them as a fast-path. All four locations are checked: `<project>/.claude/settings.local.json`, `<project>/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.claude/settings.json`.
 
 **Static rules** handle the obvious cases instantly — `ls`, `git status`, `grep` run without interruption. `sudo`, `rm -rf`, `echo $API_KEY` get blocked.
 
@@ -64,19 +66,6 @@ Rails console is a normal part of our workflow.
 **The markdown body** (after the `---`) gives the LLM extra context for classification. Write project-specific knowledge that static rules can't capture.
 
 Blocklist wins over allowlist. Neither overrides built-in blocks (`sudo`, `rm -rf`, etc. are always blocked).
-
-## Native permissions integration
-
-BashBouncer reads `Bash(prefix:*)` entries from Claude Code's own settings files (read-only — it never writes to them):
-
-| File | Scope |
-|------|-------|
-| `<project>/.claude/settings.local.json` | User-local, per-project |
-| `<project>/.claude/settings.json` | Team-shared, per-project |
-| `~/.claude/settings.local.json` | User-local, global |
-| `~/.claude/settings.json` | Global defaults |
-
-All four files are checked. Entries from `permissions.allow` and `permissions.deny` are extracted and used as a fast-path before the static/LLM classification pipeline. Deny wins over allow.
 
 ## Installation
 
