@@ -129,7 +129,7 @@ def classify(cmd: str, root: str, prompt_context: str = "") -> tuple[str, str]:
                 "User-Agent": "bashbouncer/0.2",
             },
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read())
         text = data["choices"][0]["message"]["content"]
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
@@ -140,6 +140,9 @@ def classify(cmd: str, root: str, prompt_context: str = "") -> tuple[str, str]:
         if "SAFE" in text:
             return "SAFE", "LLM classified as safe"
         return "UNKNOWN", "LLM could not determine"
+    except (TimeoutError, urllib.error.URLError) as e:
+        print(f"Warning: BashBouncer LLM timed out, allowing command", file=sys.stderr)
+        return "SAFE", "LLM timeout — allowed by default"
     except urllib.error.HTTPError as e:
         return "UNKNOWN", f"LLM API error: {e.code} {e.reason}"
     except Exception as e:

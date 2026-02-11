@@ -1,5 +1,5 @@
 {
   "name": "bashbouncer",
   "description": "Shell command safety gate: settings.json fast-path, LLM classification, ask user",
-  "version": "0.2.2"
+  "version": "0.2.3"
 }

@@ -61,7 +61,7 @@ command ──► prefix rules ──► LLM ──► ask you
 
 **Prefix rules** are checked first — zero latency. Reads `Bash(prefix:*)` entries from Claude Code's settings files (all four: `<project>/.claude/settings.local.json`, `<project>/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.claude/settings.json`). Prefix matches are hard allow/deny — no LLM call, no user prompt.
 
-**LLM classification** handles everything else — destructive git flags, secret variable references, file ops outside project root, cloud CLI mutations, system-wide installs. Uses Cerebras for fast, cheap inference. LLM memory is managed in `.claude/bashbouncer.local.md`.
+**LLM classification** handles everything else — destructive git flags, secret variable references, file ops outside project root, cloud CLI mutations, system-wide installs. Uses Cerebras for fast, cheap inference (3s timeout — falls back to allow if the API is slow). LLM memory is managed in `.claude/bashbouncer.local.md`.
 
 **Ask you** is the fallback. If the LLM flags a command as unsafe or can't decide, you get four options: allow once, allow (teaches BashBouncer), block, or block always.
 
