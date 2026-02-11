@@ -442,9 +442,14 @@ def run_hook() -> None:
 
     # LLM UNSAFE or UNKNOWN — soft deny, let user override via AskUserQuestion
     if verdict == "UNSAFE":
-        short_reason = f"BashBouncer LLM flagged as unsafe"
+        short_reason = "BashBouncer LLM flagged as unsafe"
+    elif not API_KEY:
+        short_reason = (
+            "BashBouncer: CEREBRAS_API_KEY not set — "
+            "get a free key at https://cloud.cerebras.ai/"
+        )
     else:
-        short_reason = f"BashBouncer: unrecognised command"
+        short_reason = "BashBouncer: unrecognised command"
 
     config_path = os.path.join(root, CONFIG_FILENAME) if root else CONFIG_FILENAME
     instructions = (

@@ -7,14 +7,14 @@ For those who run `claude --dangerously-skip-permissions` but still want a safet
 ## How it works
 
 ```
-command ──► static rules ──► LLM (optional) ──► ask you
-              │                    │                │
-            allow/block      allow/block         allow/block
+command ──► static rules ──► LLM ──► ask you
+              │                │          │
+            allow/block   allow/block   allow/block
 ```
 
 **Static rules** handle the obvious cases instantly — `ls`, `git status`, `grep` run without interruption. `sudo`, `rm -rf`, `echo $API_KEY` get blocked.
 
-**LLM classification** (optional) catches the nuanced stuff that regex can't — destructive git flags, cloud CLI mutations, system-wide installs. Uses Cerebras for fast, cheap inference.
+**LLM classification** catches the nuanced stuff that regex can't — destructive git flags, cloud CLI mutations, system-wide installs. Uses Cerebras for fast, cheap inference.
 
 **Ask you** is the fallback. If neither tier is confident, you decide.
 
@@ -65,18 +65,16 @@ Rails console is a normal part of our workflow.
 
 Blocklist wins over allowlist. Neither overrides built-in blocks (`sudo`, `rm -rf`, etc. are always blocked).
 
-## Adding the LLM tier
+## Installation
 
-Without an API key, commands that static rules can't classify go straight to "ask you." Add a Cerebras key to reduce prompts:
+BashBouncer uses [Cerebras](https://cloud.cerebras.ai/) for LLM classification (free API keys, generous limits):
 
 ```bash
 # Add to your shell profile (~/.zshrc, ~/.bashrc, etc.)
 export CEREBRAS_API_KEY=your-key-here
 ```
 
-Cerebras offers [free API keys](https://cloud.cerebras.ai/) with generous limits — plenty for command classification.
-
-## Installation
+Then install the plugin:
 
 ```bash
 # Add marketplace
