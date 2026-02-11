@@ -51,21 +51,45 @@ PROC_ENVIRON_RE = re.compile(r"/proc/(\d+|self)/environ")
 CONFIG_FILENAME = ".claude/bashbouncer.local.md"
 
 
-def load_prompt_context(root: str) -> str:
-    """Load LLM classification context from {root}/.claude/bashbouncer.local.md."""
+def load_user_config(root: str) -> tuple[list[str], list[str], str]:
+    """Load user config from {root}/.claude/bashbouncer.local.md.
+
+    Returns (allowlist, blocklist, prompt_context).
+    Frontmatter allowlist/blocklist entries are prefix-matched against commands.
+    Markdown body is passed as additional LLM classification context.
+    """
     path = os.path.join(root, CONFIG_FILENAME) if root else ""
     if not path or not os.path.exists(path):
-        return ""
+        return [], [], ""
 
     with open(path) as f:
         text = f.read()
 
-    # Skip YAML frontmatter if present, return markdown body only
-    if text.startswith("---"):
-        parts = text.split("---", 2)
-        return parts[2].strip() if len(parts) > 2 else ""
+    if not text.startswith("---"):
+        return [], [], text.strip()
 
-    return text.strip()
+    parts = text.split("---", 2)
+    prompt_context = parts[2].strip() if len(parts) > 2 else ""
+
+    # Parse simple YAML list format (no PyYAML dependency):
+    #   allowlist:
+    #     - docker
+    #     - rails
+    allowlist: list[str] = []
+    blocklist: list[str] = []
+    current_key: list[str] | None = None
+    for line in parts[1].splitlines():
+        stripped = line.strip()
+        if stripped == "allowlist:":
+            current_key = allowlist
+        elif stripped == "blocklist:":
+            current_key = blocklist
+        elif stripped.startswith("- ") and current_key is not None:
+            current_key.append(stripped[2:].strip())
+        elif stripped and not stripped.startswith("#"):
+            current_key = None
+
+    return allowlist, blocklist, prompt_context
 
 
 def load_user_permissions(cwd: str) -> tuple[list[str], list[str]]:
@@ -216,8 +240,14 @@ def prefilter(cmd: str, root: str) -> tuple[str, str]:
             return "UNSAFE", f"'{base}' is on the block list"
 
         if base == "rm":
-            flags = [c for a in seg.split()[1:] if a.startswith("-") for c in a.lstrip("-")]
-            if "r" in flags and "f" in flags:
+            short_flags = set()
+            has_recursive = False
+            for a in seg.split()[1:]:
+                if a == "--recursive":
+                    has_recursive = True
+                elif a.startswith("-") and not a.startswith("--"):
+                    short_flags.update(a[1:])
+            if ("r" in short_flags or has_recursive) and "f" in short_flags:
                 return "UNSAFE", "'rm -rf' is never allowed, use 'mv <target> /tmp/' instead"
 
         # Env dump commands
@@ -326,11 +356,11 @@ def _allow_once_path(cmd: str) -> str:
 
 def consume_allow_once(cmd: str) -> bool:
     """Check for and consume a one-shot allow file. Returns True if found."""
-    path = _allow_once_path(cmd)
-    if os.path.exists(path):
-        os.unlink(path)
+    try:
+        os.unlink(_allow_once_path(cmd))
         return True
-    return False
+    except FileNotFoundError:
+        return False
 
 
 def run_hook() -> None:
@@ -359,9 +389,15 @@ def run_hook() -> None:
         }}))
         return
 
-    # Check user permissions from settings.local.json
+    # Load user config (frontmatter allowlist/blocklist + LLM context)
+    config_allow, config_block, prompt_context = load_user_config(root)
+
+    # Check user permissions from settings.local.json + frontmatter
     base = get_base_cmd(cmd)
     user_allow, user_deny = load_user_permissions(root)
+    user_deny.extend(config_block)
+    user_allow.extend(config_allow)
+
     # Deny wins over allow
     for prefix in user_deny:
         if cmd.strip() == prefix or cmd.strip().startswith(prefix + " "):
@@ -378,8 +414,6 @@ def run_hook() -> None:
                 "permissionDecision": "allow",
             }}))
             return
-
-    prompt_context = load_prompt_context(root)
     verdict, source, reason = classify(cmd, root, prompt_context)
     allow_once_path = _allow_once_path(cmd)
 
@@ -461,7 +495,8 @@ def run_batch(path: str) -> None:
             cmd = obj["command"]
             root = obj.get("root", "")
 
-            verdict, source, reason = classify(cmd, root, load_prompt_context(root))
+            _, _, prompt_context = load_user_config(root)
+            verdict, source, reason = classify(cmd, root, prompt_context)
             if source == "llm":
                 if verdict == "UNKNOWN":
                     verdict = "UNSAFE"
