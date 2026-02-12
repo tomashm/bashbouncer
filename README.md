@@ -1,6 +1,6 @@
 # BashBouncer
 
-A shell command safety gate for Claude Code that learns as you use it. Intercepts every Bash call before it runs.
+A shell command safety gate for Claude Code that learns as you use it. Intercepts every Bash call before it runs. Powered by Llama on [Cerebras](https://cerebras.ai/) — lightning fast inference.
 
 For those who run `claude --dangerously-skip-permissions` but still want a safety net.
 
