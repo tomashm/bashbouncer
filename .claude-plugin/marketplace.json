@@ -4,13 +4,13 @@
     "name": "tomashm"
   },
   "metadata": {
-    "description": "Three-tier shell command safety gate for Claude Code"
+    "description": "Shell command safety gate for Claude Code that learns as you use it"
   },
   "plugins": [
     {
       "name": "bashbouncer",
       "source": "./",
-      "description": "Three-tier shell command safety gate: static rules, LLM, ask user",
+      "description": "Shell command safety gate that learns as you use it — intercepts every Bash call before it runs",
       "homepage": "https://github.com/tomashm/bashbouncer",
       "repository": "https://github.com/tomashm/bashbouncer"
     }
