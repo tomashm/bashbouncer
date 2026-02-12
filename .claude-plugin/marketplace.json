@@ -10,7 +10,7 @@
     {
       "name": "bashbouncer",
       "source": "./",
-      "description": "Shell command safety gate that learns as you use it — intercepts every Bash call before it runs",
+      "description": "Shell command safety gate powered by Llama — learns as you use it, intercepts every Bash call before it runs",
       "homepage": "https://github.com/tomashm/bashbouncer",
       "repository": "https://github.com/tomashm/bashbouncer"
     }

@@ -1,5 +1,5 @@
 {
   "name": "bashbouncer",
-  "description": "Shell command safety gate that learns as you use it — intercepts every Bash call before it runs",
-  "version": "0.2.5"
+  "description": "Shell command safety gate powered by Llama — learns as you use it, intercepts every Bash call before it runs",
+  "version": "0.2.6"
 }
