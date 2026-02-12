@@ -14,19 +14,6 @@ For those who run `claude --dangerously-skip-permissions` but still want a safet
 
 ❯ ssh to 192.168.1.1 and reboot it using "shutdown"
 
-⏺ This will reboot a remote machine, which disrupts any running services and active connections. Before I proceed:
-
-  - Is this a device you control (e.g., home router at 192.168.1.1)?
-  - Are you fine with immediate reboot (shutdown -r now)?
-
-  If so, I'll run:
-
-  ssh 192.168.1.1 'sudo shutdown -r now'
-
-  Confirm and I'll execute it.
-
-❯ yes
-
 ⏺ Bash(ssh 192.168.1.1 'sudo shutdown -r now')
   ⎿  PreToolUse:Bash hook returned blocking error
   ⎿  Error: BashBouncer LLM flagged as unsafe
